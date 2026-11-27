@@ -1,0 +1,24 @@
+# Runs the app and PostgreSQL on one machine (small VPS or always-on office PC).
+# eSSL devices push to http://<this machine>:8081/iclock/cdata
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hrm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: hrm
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on: [db]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://hrm:${POSTGRES_PASSWORD}@db:5432/hrm
+    ports:
+      - "80:3000"    # web portal
+      - "8081:3000"  # eSSL device push port
+volumes:
+  pgdata:

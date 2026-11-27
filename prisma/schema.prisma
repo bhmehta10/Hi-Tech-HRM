@@ -1,0 +1,230 @@
+// Hi-Tech HRM data model (version 1: one company, no tenants).
+// All wall-clock times are India Standard Time (Asia/Kolkata, UTC+05:30).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  MANAGER
+  EMPLOYEE
+}
+
+enum DayStatus {
+  PRESENT
+  HALF_DAY
+  ABSENT
+  MISSED_PUNCH
+  WEEKLY_OFF
+  HOLIDAY
+  LEAVE
+}
+
+enum RequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+model Department {
+  id        Int        @id @default(autoincrement())
+  name      String     @unique
+  employees Employee[]
+}
+
+model Shift {
+  id                 Int        @id @default(autoincrement())
+  name               String     @unique
+  /// "HH:MM", 24-hour, IST
+  startTime          String
+  /// "HH:MM"; if earlier than startTime the shift ends the next day
+  endTime            String
+  graceMinutes       Int        @default(10)
+  /// Minimum worked minutes for a full day / half day
+  fullDayMinutes     Int        @default(480)
+  halfDayMinutes     Int        @default(240)
+  /// Minutes worked past shift end before overtime counts
+  otThresholdMinutes Int        @default(30)
+  /// Weekdays off, 0 = Sunday ... 6 = Saturday
+  weeklyOffs         Int[]      @default([0])
+  employees          Employee[]
+}
+
+model Employee {
+  id           Int         @id @default(autoincrement())
+  code         String      @unique
+  name         String
+  email        String?     @unique
+  phone        String?
+  role         Role        @default(EMPLOYEE)
+  passwordHash String
+  joinDate     DateTime    @db.Date
+  active       Boolean     @default(true)
+  /// User ID / PIN enrolled on the biometric device
+  deviceUserId String?     @unique
+  departmentId Int?
+  department   Department? @relation(fields: [departmentId], references: [id])
+  shiftId      Int
+  shift        Shift       @relation(fields: [shiftId], references: [id])
+  managerId    Int?
+  manager      Employee?   @relation("Reports", fields: [managerId], references: [id])
+  reports      Employee[]  @relation("Reports")
+
+  attendance      AttendanceDay[]
+  leaveRequests   LeaveRequest[]     @relation("LeaveApplicant")
+  leaveApprovals  LeaveRequest[]     @relation("LeaveApprover")
+  leaveLedger     LeaveLedger[]
+  regularisations Regularisation[]   @relation("RegApplicant")
+  regApprovals    Regularisation[]   @relation("RegApprover")
+  documents       EmployeeDocument[]
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+}
+
+model Holiday {
+  id   Int      @id @default(autoincrement())
+  date DateTime @unique @db.Date
+  name String
+}
+
+model Device {
+  id         Int       @id @default(autoincrement())
+  serial     String    @unique
+  name       String?
+  lastSeenAt DateTime?
+  /// Highest ATTLOG stamp acknowledged, echoed back on handshake
+  attStamp   String    @default("0")
+  createdAt  DateTime  @default(now())
+}
+
+/// Punches exactly as received; never edited. Processing reads from here.
+model RawPunch {
+  id           Int      @id @default(autoincrement())
+  deviceSerial String
+  deviceUserId String
+  punchTime    DateTime
+  verifyMode   Int?
+  inOutState   Int?
+  source       String   @default("device") // device | csv | manual
+  receivedAt   DateTime @default(now())
+
+  @@unique([deviceSerial, deviceUserId, punchTime])
+  @@index([deviceUserId, punchTime])
+}
+
+model AttendanceDay {
+  id            Int       @id @default(autoincrement())
+  employeeId    Int
+  employee      Employee  @relation(fields: [employeeId], references: [id])
+  date          DateTime  @db.Date
+  firstIn       DateTime?
+  lastOut       DateTime?
+  workedMinutes Int       @default(0)
+  lateMinutes   Int       @default(0)
+  otMinutes     Int       @default(0)
+  status        DayStatus
+  /// Leave type code when status = LEAVE
+  leaveCode     String?
+  processedAt   DateTime  @default(now())
+
+  @@unique([employeeId, date])
+  @@index([date])
+}
+
+model LeaveType {
+  id           Int            @id @default(autoincrement())
+  code         String         @unique // CL, SL, EL, LWP ...
+  name         String
+  /// Days credited per year (pro-rated monthly)
+  annualQuota  Decimal        @default(0) @db.Decimal(5, 2)
+  paid         Boolean        @default(true)
+  carryForward Boolean        @default(false)
+  requests     LeaveRequest[]
+  ledger       LeaveLedger[]
+}
+
+/// Every credit (+) and debit (-) to a leave balance; balance = sum(days).
+model LeaveLedger {
+  id          Int       @id @default(autoincrement())
+  employeeId  Int
+  employee    Employee  @relation(fields: [employeeId], references: [id])
+  leaveTypeId Int
+  leaveType   LeaveType @relation(fields: [leaveTypeId], references: [id])
+  days        Decimal   @db.Decimal(5, 2)
+  reason      String
+  requestId   Int?
+  createdAt   DateTime  @default(now())
+
+  @@index([employeeId, leaveTypeId])
+}
+
+model LeaveRequest {
+  id           Int           @id @default(autoincrement())
+  employeeId   Int
+  employee     Employee      @relation("LeaveApplicant", fields: [employeeId], references: [id])
+  leaveTypeId  Int
+  leaveType    LeaveType     @relation(fields: [leaveTypeId], references: [id])
+  fromDate     DateTime      @db.Date
+  toDate       DateTime      @db.Date
+  days         Decimal       @db.Decimal(5, 2)
+  reason       String
+  status       RequestStatus @default(PENDING)
+  approverId   Int?
+  approver     Employee?     @relation("LeaveApprover", fields: [approverId], references: [id])
+  decidedAt    DateTime?
+  decisionNote String?
+  createdAt    DateTime      @default(now())
+}
+
+/// Missed / wrong punch correction raised by the employee.
+model Regularisation {
+  id         Int           @id @default(autoincrement())
+  employeeId Int
+  employee   Employee      @relation("RegApplicant", fields: [employeeId], references: [id])
+  date       DateTime      @db.Date
+  inTime     String // "HH:MM"
+  outTime    String // "HH:MM"
+  reason     String
+  status     RequestStatus @default(PENDING)
+  approverId Int?
+  approver   Employee?     @relation("RegApprover", fields: [approverId], references: [id])
+  decidedAt  DateTime?
+  createdAt  DateTime      @default(now())
+}
+
+/// Once a month is locked its attendance is final for payroll.
+model AttendanceLock {
+  id       Int      @id @default(autoincrement())
+  month    String   @unique // "YYYY-MM"
+  lockedAt DateTime @default(now())
+  lockedBy Int
+}
+
+model EmployeeDocument {
+  id         Int       @id @default(autoincrement())
+  employeeId Int
+  employee   Employee  @relation(fields: [employeeId], references: [id])
+  docType    String // Aadhaar, PAN, Offer letter ...
+  fileName   String
+  storedPath String
+  expiresOn  DateTime? @db.Date
+  verified   Boolean   @default(false)
+  uploadedAt DateTime  @default(now())
+}
+
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  actorId   Int?
+  action    String
+  entity    String
+  entityId  String?
+  detail    Json?
+  createdAt DateTime @default(now())
+}
